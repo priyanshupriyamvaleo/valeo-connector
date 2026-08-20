@@ -41,7 +41,7 @@ idle and the first call after a nap takes 30-60s — open the health URL to warm
 | `get_supplement_plan` | "What supplements am I on and why?" | — |
 
 Health categories in the sample panel: Heart, Metabolic, Vitamins & Minerals, Thyroid, Liver,
-Kidney, Blood & Immunity, Hormones, Female Health.
+Kidney, Blood & Immunity, Hormones, Male Health.
 
 Like Function Health, the connector deliberately exposes **summary-level data only** —
 counts, categories, flags and directions ("Vitamin D, low, significant"), never raw lab values.

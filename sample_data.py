@@ -7,7 +7,7 @@ authenticated member's token. The MCP tool layer in server.py does not change.
 """
 
 MEMBER = {
-    "first_name": "Aisha",
+    "first_name": "Sundeep",
     "city": "Dubai",
     "member_since": "2025-03-14",
     "plan": "Valeo Complete",
@@ -37,7 +37,7 @@ LAB_PANEL = {
          "flagged": [{"marker": "hs-CRP", "direction": "high", "severity": "mild"}]},
         {"category": "Hormones",           "total": 7,  "in_range": 6, "out_of_range": 1,
          "flagged": [{"marker": "Cortisol (AM)", "direction": "high", "severity": "mild"}]},
-        {"category": "Female Health",      "total": 3,  "in_range": 3, "out_of_range": 0, "flagged": []},
+        {"category": "Male Health",        "total": 3,  "in_range": 3, "out_of_range": 0, "flagged": []},
     ],
     "trends": {
         "Vitamin D": "improving (was significantly low in Feb 2026)",
