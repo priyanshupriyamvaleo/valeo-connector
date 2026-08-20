@@ -29,6 +29,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import sample_data as db
 
+
+def log(message):
+    sys.stderr.write("[valeo] %s\n" % message)
+    sys.stderr.flush()
+
+
 MODERN_VERSION = "2026-07-28"
 MODERN_VERSIONS = (MODERN_VERSION,)
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
@@ -37,7 +43,7 @@ ALL_VERSIONS = MODERN_VERSIONS + LEGACY_VERSIONS
 
 SERVER_NAME = "valeo-connector"
 SERVER_TITLE = "Valeo Health"
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.4.0"
 MCP_PATH = "/mcp"
 
 INSTRUCTIONS = (
@@ -67,6 +73,41 @@ ERR_HEADER_MISMATCH = -32020
 ERR_UNSUPPORTED_VERSION = -32022
 
 CACHE_TTL_MS = 3600000
+
+WEBSITE_URL = "https://feelvaleo.com"
+ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+
+
+def _load_icon(filename):
+    """Read a brand icon from assets/, returning (bytes, data_uri) or (None, None).
+
+    Kept optional on purpose: a missing asset must not stop the server from serving tools.
+    """
+    path = os.path.join(ASSET_DIR, filename)
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        log("icon %s unavailable: %s" % (filename, exc))
+        return None, None
+    return raw, "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+
+
+ICON_LARGE, _ = _load_icon("icon-512.png")
+ICON_SMALL, ICON_SMALL_DATA_URI = _load_icon("icon-128.png")
+
+# SEP-973 icons, declared on the server's Implementation metadata. A data URI is used so a
+# client needs no second request and no CORS allowance to render it.
+ICONS = ([{"src": ICON_SMALL_DATA_URI, "mimeType": "image/png", "sizes": ["128x128"]}]
+         if ICON_SMALL_DATA_URI else [])
+
+
+def server_info():
+    info = {"name": SERVER_NAME, "title": SERVER_TITLE, "version": SERVER_VERSION,
+            "websiteUrl": WEBSITE_URL}
+    if ICONS:
+        info["icons"] = ICONS
+    return info
 
 
 # =============================================================================
@@ -335,11 +376,6 @@ HANDLERS = {
 # JSON-RPC / MCP dispatch
 # =============================================================================
 
-def log(message):
-    sys.stderr.write("[valeo] %s\n" % message)
-    sys.stderr.flush()
-
-
 def _result(req_id, result, era):
     if era == "modern":
         # Modern results declare whether they are final or awaiting client input.
@@ -375,8 +411,7 @@ def handle_message(msg, era):
             "instructions": INSTRUCTIONS,
             "ttlMs": CACHE_TTL_MS,
             "cacheScope": "public",
-            "_meta": {META_SERVER_INFO: {
-                "name": SERVER_NAME, "title": SERVER_TITLE, "version": SERVER_VERSION}},
+            "_meta": {META_SERVER_INFO: server_info()},
         }, era)
 
     # --- legacy handshake --------------------------------------------------------
@@ -386,7 +421,7 @@ def handle_message(msg, era):
         return 200, _result(req_id, {
             "protocolVersion": negotiated,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": SERVER_NAME, "title": SERVER_TITLE, "version": SERVER_VERSION},
+            "serverInfo": server_info(),
             "instructions": INSTRUCTIONS,
         }, "legacy")
 
@@ -567,6 +602,12 @@ class MCPHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
+        if path in ("/icon.png", "/icon-512.png") and ICON_LARGE:
+            self._send(200, ICON_LARGE, "image/png", {"Cache-Control": "public, max-age=86400"})
+            return
+        if path in ("/icon-128.png", "/favicon.png", "/favicon.ico") and ICON_SMALL:
+            self._send(200, ICON_SMALL, "image/png", {"Cache-Control": "public, max-age=86400"})
+            return
         if path in ("/", "/health"):
             self._send_json(200, {
                 "status": "ok", "server": SERVER_NAME, "version": SERVER_VERSION,

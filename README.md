@@ -29,6 +29,7 @@ idle and the first call after a nap takes 30-60s — open the health URL to warm
 | `test_server.py` | 22-check smoke test of the protocol and every tool |
 | `.mcp.json` | Project-scoped config so Claude Code picks up the local server automatically |
 | `run.sh` | `./run.sh` to start it |
+| `assets/` | Brand icon, plus `make_icon.py` to regenerate it from the wordmark (needs Pillow; the server does not) |
 
 ## Tools
 
@@ -45,6 +46,17 @@ Kidney, Blood & Immunity, Hormones, Male Health.
 
 Like Function Health, the connector deliberately exposes **summary-level data only** —
 counts, categories, flags and directions ("Vitamin D, low, significant"), never raw lab values.
+
+## Icon
+
+The server advertises a square brand icon on its `serverInfo` as a data URI, per the MCP
+icons field (SEP-973), and serves it at `/icon.png`, `/icon-128.png` and `/favicon.ico`.
+
+Claude.ai does not render this yet for custom connectors - custom connectors show a generic
+icon regardless of what the server declares
+([claude-ai-mcp#152](https://github.com/anthropics/claude-ai-mcp/issues/152)). Declaring it
+costs nothing and starts working the day that lands. A branded icon today requires a
+Connectors Directory listing, where the icon is uploaded during submission.
 
 ## Run it
 

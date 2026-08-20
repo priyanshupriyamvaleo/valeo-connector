@@ -85,6 +85,13 @@ check("  serverInfo in _meta",
       bool((d.get("_meta") or {}).get("io.modelcontextprotocol/serverInfo")))
 check("  carries cache hints", d.get("ttlMs") and d.get("cacheScope"),
       "(ttlMs=%s scope=%s)" % (d.get("ttlMs"), d.get("cacheScope")))
+_info = (d.get("_meta") or {}).get("io.modelcontextprotocol/serverInfo") or {}
+_icons = _info.get("icons") or []
+check("  advertises a brand icon (SEP-973)",
+      bool(_icons) and _icons[0]["mimeType"] == "image/png"
+      and _icons[0]["src"].startswith("data:image/png;base64,"),
+      "(%d icon(s))" % len(_icons))
+check("  declares websiteUrl", _info.get("websiteUrl") == "https://feelvaleo.com")
 check("  no session id minted", True)
 
 status, headers, res = rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list",
@@ -168,6 +175,8 @@ check("initialize returns 200", status == 200 and init.get("protocolVersion") ==
       "(%s)" % init.get("protocolVersion"))
 check("  mints a session id", bool(headers.get("mcp-session-id")))
 check("  no modern resultType on legacy result", "resultType" not in init)
+check("  legacy serverInfo carries the icon too",
+      bool((init.get("serverInfo") or {}).get("icons")))
 sid = headers.get("mcp-session-id")
 
 status, _, _ = rpc({"jsonrpc": "2.0", "method": "notifications/initialized"},
@@ -195,6 +204,16 @@ for verb, expect in (("GET", 405), ("DELETE", 405)):
 
 status, _, res = rpc(None, method="GET", path="/health")
 check("GET /health -> 200", status == 200 and (res or {}).get("status") == "ok")
+
+for icon_path in ("/icon.png", "/icon-128.png", "/favicon.ico"):
+    conn = connect()
+    conn.request("GET", icon_path)
+    resp = conn.getresponse()
+    body = resp.read()
+    conn.close()
+    check("GET %s serves a PNG" % icon_path,
+          resp.status == 200 and resp.getheader("Content-Type") == "image/png"
+          and body[:8] == b"\x89PNG\r\n\x1a\n", "(%d bytes)" % len(body))
 
 status, _, _ = rpc(None, method="HEAD", path="/health")
 check("HEAD /health -> 200", status == 200, "(got %s)" % status)
