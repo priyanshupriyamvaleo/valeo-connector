@@ -437,6 +437,17 @@ class MCPHandler(BaseHTTPRequestHandler):
             return
         self._send(404, b'{"error":"not found"}', "application/json")
 
+    def do_HEAD(self):
+        # Some reachability probes use HEAD. Without this, BaseHTTPRequestHandler answers 501,
+        # which looks like a broken server.
+        path = self.path.split("?")[0]
+        if path in ("/", "/health"):
+            self._send(200, b"", "application/json")
+        elif path == MCP_PATH:
+            self._send(405, b"", "text/plain", {"Allow": "POST, DELETE, OPTIONS"})
+        else:
+            self._send(404)
+
     def do_DELETE(self):
         # Session teardown. Stateless server, so nothing to clean up.
         self._send(204 if self.path.split("?")[0] == MCP_PATH else 404)
