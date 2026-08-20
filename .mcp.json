@@ -3,6 +3,10 @@
     "valeo": {
       "type": "http",
       "url": "http://127.0.0.1:8787/mcp"
+    },
+    "valeo-live": {
+      "type": "http",
+      "url": "https://valeo-connector.onrender.com/mcp"
     }
   }
 }
