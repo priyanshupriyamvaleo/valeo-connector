@@ -404,10 +404,17 @@ class MCPHandler(BaseHTTPRequestHandler):
         self._send(200, body, "text/event-stream", extra_headers)
 
     def _origin_ok(self):
+        """Log unrecognised origins without blocking.
+
+        Origin checks exist to stop DNS rebinding against servers bound to localhost. This
+        server is public and authless, so rejecting an unexpected Origin buys no security and
+        risks refusing a legitimate client. Reinstate the block when auth lands and the server
+        is only meant to be reached from known surfaces.
+        """
         origin = self.headers.get("Origin")
-        if not origin:  # server-to-server calls (Claude's backend) send no Origin
-            return True
-        return any(origin.startswith(p) for p in ALLOWED_ORIGIN_PREFIXES)
+        if origin and not any(origin.startswith(p) for p in ALLOWED_ORIGIN_PREFIXES):
+            log("unrecognised Origin (allowed anyway): %s" % origin)
+        return True
 
     # -- verbs ----------------------------------------------------------------
     def do_OPTIONS(self):
@@ -424,6 +431,8 @@ class MCPHandler(BaseHTTPRequestHandler):
             return
         if self.path.split("?")[0] == MCP_PATH:
             # No server-initiated stream in this MVP; 405 is spec-compliant.
+            log("GET %s ua=%r accept=%r -> 405" % (
+                self.path, self.headers.get("User-Agent"), self.headers.get("Accept")))
             self._send(405, b"", "text/plain", {"Allow": "POST, DELETE, OPTIONS"})
             return
         self._send(404, b'{"error":"not found"}', "application/json")
@@ -455,8 +464,19 @@ class MCPHandler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(raw.decode("utf-8"))
         except Exception:
+            log("parse error, first 200 bytes: %r" % raw[:200])
             self._send_json(400, _error(None, -32700, "Parse error"))
             return
+
+        log("POST %s ua=%r accept=%r proto=%r origin=%r session=%r method=%r" % (
+            self.path,
+            self.headers.get("User-Agent"),
+            self.headers.get("Accept"),
+            self.headers.get("MCP-Protocol-Version"),
+            self.headers.get("Origin"),
+            self.headers.get("Mcp-Session-Id"),
+            payload.get("method") if isinstance(payload, dict) else "batch",
+        ))
 
         batch = isinstance(payload, list)
         messages = payload if batch else [payload]
@@ -474,11 +494,13 @@ class MCPHandler(BaseHTTPRequestHandler):
         if not batch and payload.get("method") == "initialize":
             extra["Mcp-Session-Id"] = uuid.uuid4().hex
 
+        # We never send server-initiated messages, so a single JSON object is the simplest
+        # correct answer. Only fall back to SSE if the client refuses JSON.
         accept = (self.headers.get("Accept") or "")
-        if "text/event-stream" in accept:
-            self._send_sse(out, extra)
-        else:
+        if "application/json" in accept or "*/*" in accept or not accept:
             self._send_json(200, out, extra)
+        else:
+            self._send_sse(out, extra)
 
 
 def main():

@@ -89,13 +89,17 @@ except urllib.error.HTTPError as e:
     code = e.code
 check("GET /mcp -> 405", code == 405, "(got %s)" % code)
 
-req = urllib.request.Request(URL, data=b"{}", method="POST",
-                             headers={"Content-Type": "application/json", "Origin": "https://evil.example"})
+req = urllib.request.Request(URL, data=json.dumps({"jsonrpc": "2.0", "id": 13, "method": "ping"}).encode(),
+                             method="POST",
+                             headers={"Content-Type": "application/json", "Accept": "application/json",
+                                      "Origin": "https://unexpected.example"})
 try:
-    urllib.request.urlopen(req, timeout=5); code = 200
+    with urllib.request.urlopen(req, timeout=10) as r:
+        code, ctype = r.status, r.headers.get("Content-Type")
 except urllib.error.HTTPError as e:
-    code = e.code
-check("hostile Origin -> 403", code == 403, "(got %s)" % code)
+    code, ctype = e.code, None
+check("unexpected Origin allowed, not blocked", code == 200, "(got %s)" % code)
+check("responds with application/json, not SSE", ctype == "application/json", "(got %s)" % ctype)
 
 print("\n%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
