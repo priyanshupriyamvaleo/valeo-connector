@@ -8,6 +8,16 @@ the same way the Function Health connector works.
 - **Auth:** none yet (demo). All data comes from `sample_data.py`.
 - **Read-only.** Every tool is annotated `readOnlyHint: true`.
 
+**Live demo endpoint** (sample data, no auth):
+
+```
+https://valeo-connector.onrender.com/mcp
+```
+
+Add that in Claude under Settings > Connectors > Add custom connector. Health check:
+<https://valeo-connector.onrender.com/health>. Free instance, so it sleeps after ~15 minutes
+idle and the first call after a nap takes 30-60s — open the health URL to warm it before a demo.
+
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/priyanshupriyamvaleo/valeo-connector)
 
 ## Files
@@ -66,7 +76,7 @@ tunnels that die on restart will not do. Deploy the repo, then anyone on a paid 
 **Claude → Settings → Connectors → Add custom connector** → paste
 
 ```
-https://<your-host>/mcp
+https://valeo-connector.onrender.com/mcp
 ```
 
 ### Deploying
@@ -79,7 +89,7 @@ https://<your-host>/mcp
    **New → Blueprint** → pick this repo → Apply. Either way it reads `render.yaml`.
 2. Sign in with GitHub and approve access to the repo.
 3. You get `https://valeo-connector.onrender.com` (Render may add a suffix if the name is taken).
-   The connector URL is that plus `/mcp`.
+   The connector URL is that plus `/mcp`. Pushing to `main` auto-redeploys.
 
 Verify the deploy before wiring it into Claude:
 
