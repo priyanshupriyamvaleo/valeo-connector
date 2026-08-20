@@ -1,0 +1,15 @@
+# Render blueprint. Free plan, no dependencies to install.
+# Render injects PORT; server.py reads HOST and PORT from the environment.
+services:
+  - type: web
+    name: valeo-connector
+    runtime: python
+    plan: free
+    buildCommand: "echo 'no dependencies - standard library only'"
+    startCommand: "python server.py"
+    healthCheckPath: /health
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: PYTHON_VERSION
+        value: "3.12.7"
