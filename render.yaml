@@ -8,6 +8,7 @@ services:
     buildCommand: "echo 'no dependencies - standard library only'"
     startCommand: "python server.py"
     healthCheckPath: /health
+    autoDeploy: true
     envVars:
       - key: HOST
         value: 0.0.0.0
