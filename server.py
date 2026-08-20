@@ -3,13 +3,24 @@
 Valeo Connector - a minimal remote MCP server for Claude custom connectors.
 
 Zero dependencies: standard library only, runs on Python 3.7+.
-Transport: Streamable HTTP (MCP spec 2025-06-18) on a single /mcp endpoint.
+Transport: Streamable HTTP on a single /mcp endpoint.
 Auth: none (demo). Add OAuth later - see README.
+
+This is a DUAL-ERA server. Two generations of MCP are in the wild:
+
+  modern (2026-07-28 and later) - no handshake, no sessions. Every request carries its
+      protocol version, client identity and capabilities in params._meta, mirrored into
+      HTTP headers. Servers MUST implement server/discover.
+  legacy (2025-11-25 and earlier) - an initialize handshake opens a session.
+
+Claude's connector client is modern. A server that only speaks legacy fails against it,
+so both are implemented here and the era is chosen per request.
 
 Run:  python3 server.py            (listens on http://127.0.0.1:8787/mcp)
       PORT=9000 HOST=0.0.0.0 python3 server.py
 """
 
+import base64
 import json
 import os
 import sys
@@ -18,11 +29,38 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import sample_data as db
 
-PROTOCOL_VERSION = "2025-06-18"
-SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
+MODERN_VERSION = "2026-07-28"
+MODERN_VERSIONS = (MODERN_VERSION,)
+LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+# Advertised newest first; clients pick from this list.
+ALL_VERSIONS = MODERN_VERSIONS + LEGACY_VERSIONS
+
 SERVER_NAME = "valeo-connector"
-SERVER_VERSION = "0.1.0"
+SERVER_TITLE = "Valeo Health"
+SERVER_VERSION = "0.2.0"
 MCP_PATH = "/mcp"
+
+INSTRUCTIONS = (
+    "Valeo Health connector. Provides summary-level lab results, wellness program progress, "
+    "appointments and supplement protocols for the connected member. Data is read-only and "
+    "summary-level; it is not medical advice. DEMO BUILD: this server returns sample data for "
+    "a fictional member, not real member records. Say so if the user seems to think the data "
+    "is theirs."
+)
+
+# Per-request metadata keys used by the modern protocol.
+META_VERSION = "io.modelcontextprotocol/protocolVersion"
+META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
+META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
+
+# JSON-RPC error codes. -32020 and -32022 are allocated by the MCP spec.
+ERR_METHOD_NOT_FOUND = -32601
+ERR_INVALID_PARAMS = -32602
+ERR_PARSE = -32700
+ERR_HEADER_MISMATCH = -32020
+ERR_UNSUPPORTED_VERSION = -32022
+
+CACHE_TTL_MS = 3600000
 
 
 # =============================================================================
@@ -292,79 +330,103 @@ HANDLERS = {
 # JSON-RPC / MCP dispatch
 # =============================================================================
 
-def _result(req_id, result):
+def log(message):
+    sys.stderr.write("[valeo] %s\n" % message)
+    sys.stderr.flush()
+
+
+def _result(req_id, result, era):
+    if era == "modern":
+        # Modern results declare whether they are final or awaiting client input.
+        result = dict(result)
+        result.setdefault("resultType", "complete")
     return {"jsonrpc": "2.0", "id": req_id, "result": result}
 
 
-def _error(req_id, code, message):
-    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+def _error(req_id, code, message, data=None):
+    err = {"code": code, "message": message}
+    if data is not None:
+        err["data"] = data
+    return {"jsonrpc": "2.0", "id": req_id, "error": err}
 
 
-def handle_message(msg):
-    """Handle one JSON-RPC message. Returns a response dict, or None for notifications."""
+def handle_message(msg, era):
+    """Handle one JSON-RPC message.
+
+    Returns (http_status, response_dict_or_None). Notifications get 202 and no body.
+    """
     method = msg.get("method")
     req_id = msg.get("id")
     params = msg.get("params") or {}
 
-    # Notifications carry no id and get no response body.
     if req_id is None:
-        return None
+        return 202, None
 
+    # --- modern discovery: mandatory in 2026-07-28 -------------------------------
+    if method == "server/discover":
+        return 200, _result(req_id, {
+            "supportedVersions": list(ALL_VERSIONS),
+            "capabilities": {"tools": {}},
+            "instructions": INSTRUCTIONS,
+            "ttlMs": CACHE_TTL_MS,
+            "cacheScope": "public",
+            "_meta": {META_SERVER_INFO: {
+                "name": SERVER_NAME, "title": SERVER_TITLE, "version": SERVER_VERSION}},
+        }, era)
+
+    # --- legacy handshake --------------------------------------------------------
     if method == "initialize":
         client_version = params.get("protocolVersion")
-        negotiated = client_version if client_version in SUPPORTED_PROTOCOL_VERSIONS else PROTOCOL_VERSION
-        return _result(req_id, {
+        negotiated = client_version if client_version in LEGACY_VERSIONS else LEGACY_VERSIONS[0]
+        return 200, _result(req_id, {
             "protocolVersion": negotiated,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": SERVER_NAME, "title": "Valeo Health", "version": SERVER_VERSION},
-            "instructions": (
-                "Valeo Health connector. Provides summary-level lab results, wellness program "
-                "progress, appointments and supplement protocols for the connected member. "
-                "Data is read-only and summary-level; it is not medical advice. "
-                "DEMO BUILD: this server returns sample data for a fictional member, not real "
-                "member records. Say so if the user seems to think the data is theirs."
-            ),
-        })
+            "serverInfo": {"name": SERVER_NAME, "title": SERVER_TITLE, "version": SERVER_VERSION},
+            "instructions": INSTRUCTIONS,
+        }, "legacy")
 
     if method == "ping":
-        return _result(req_id, {})
+        return 200, _result(req_id, {}, era)
 
     if method == "tools/list":
-        return _result(req_id, {"tools": TOOLS})
+        result = {"tools": TOOLS}
+        if era == "modern":
+            # The tool list is identical for every caller, so it is safe to cache publicly.
+            result["ttlMs"] = CACHE_TTL_MS
+            result["cacheScope"] = "public"
+        return 200, _result(req_id, result, era)
 
     if method in ("resources/list", "resources/templates/list"):
-        return _result(req_id, {"resources": [], "resourceTemplates": []})
+        return 200, _result(req_id, {"resources": [], "resourceTemplates": []}, era)
 
     if method == "prompts/list":
-        return _result(req_id, {"prompts": []})
+        return 200, _result(req_id, {"prompts": []}, era)
 
     if method == "tools/call":
         name = params.get("name")
         args = params.get("arguments") or {}
         handler = HANDLERS.get(name)
         if handler is None:
-            return _error(req_id, -32602, "Unknown tool: %s" % name)
+            return 200, _error(req_id, ERR_INVALID_PARAMS, "Unknown tool: %s" % name)
         try:
             text = handler(**args)
         except TypeError as exc:
-            return _result(req_id, {
+            return 200, _result(req_id, {
                 "content": [{"type": "text", "text": "Invalid arguments for %s: %s" % (name, exc)}],
                 "isError": True,
-            })
+            }, era)
         except Exception as exc:  # surface tool errors as tool results, per MCP guidance
             log("tool error in %s: %r" % (name, exc))
-            return _result(req_id, {
+            return 200, _result(req_id, {
                 "content": [{"type": "text", "text": "Valeo could not retrieve that right now: %s" % exc}],
                 "isError": True,
-            })
-        return _result(req_id, {"content": [{"type": "text", "text": text}], "isError": False})
+            }, era)
+        return 200, _result(req_id, {
+            "content": [{"type": "text", "text": text}], "isError": False}, era)
 
-    return _error(req_id, -32601, "Method not found: %s" % method)
-
-
-def log(message):
-    sys.stderr.write("[valeo] %s\n" % message)
-    sys.stderr.flush()
+    # Modern transport requires 404 (not 200) for an unimplemented method, with the JSON-RPC
+    # error in the body so a client can tell this from a 404 by an unrelated server.
+    return 404, _error(req_id, ERR_METHOD_NOT_FOUND, "Method not found: %s" % method)
 
 
 # =============================================================================
@@ -372,6 +434,16 @@ def log(message):
 # =============================================================================
 
 ALLOWED_ORIGIN_PREFIXES = ("https://claude.ai", "https://claude.com", "http://localhost", "http://127.0.0.1")
+
+
+def decode_header_value(value):
+    """Undo the Base64 sentinel encoding the spec defines for non-ASCII header values."""
+    if value and value.startswith("=?base64?") and value.endswith("?="):
+        try:
+            return base64.b64decode(value[len("=?base64?"):-len("?=")]).decode("utf-8")
+        except Exception:
+            return value
+    return value
 
 
 class MCPHandler(BaseHTTPRequestHandler):
@@ -388,7 +460,6 @@ class MCPHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Expose-Headers", "Mcp-Session-Id")
         for key, value in (extra_headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -396,120 +467,205 @@ class MCPHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _send_json(self, status, payload, extra_headers=None):
+        if status >= 400:
+            # Don't reuse a connection after an error; it is not worth the desync risk.
+            self.close_connection = True
         self._send(status, json.dumps(payload).encode("utf-8"), "application/json", extra_headers)
 
     def _send_sse(self, payload, extra_headers=None):
         """Deliver a single JSON-RPC response as a one-event SSE stream, then close."""
+        headers = {"X-Accel-Buffering": "no"}
+        headers.update(extra_headers or {})
         body = ("event: message\ndata: %s\n\n" % json.dumps(payload)).encode("utf-8")
-        self._send(200, body, "text/event-stream", extra_headers)
+        self._send(200, body, "text/event-stream", headers)
 
-    def _origin_ok(self):
-        """Log unrecognised origins without blocking.
+    def _read_body(self):
+        """Read the request body completely, honouring chunked transfer encoding.
 
-        Origin checks exist to stop DNS rebinding against servers bound to localhost. This
-        server is public and authless, so rejecting an unexpected Origin buys no security and
-        risks refusing a legitimate client. Reinstate the block when auth lands and the server
-        is only meant to be reached from known surfaces.
+        This MUST happen before any response is written. Replying while the body is still
+        in the socket desyncs a keep-alive connection: the server then parses the leftover
+        body bytes as the next HTTP request line and answers 501 to nonsense.
         """
-        origin = self.headers.get("Origin")
-        if origin and not any(origin.startswith(p) for p in ALLOWED_ORIGIN_PREFIXES):
-            log("unrecognised Origin (allowed anyway): %s" % origin)
-        return True
-
-    # -- verbs ----------------------------------------------------------------
-    def do_OPTIONS(self):
-        self._send(204, extra_headers={
-            "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Accept, Authorization, Mcp-Session-Id, MCP-Protocol-Version",
-            "Access-Control-Max-Age": "86400",
-        })
-
-    def do_GET(self):
-        if self.path.split("?")[0] in ("/", "/health"):
-            self._send_json(200, {"status": "ok", "server": SERVER_NAME, "version": SERVER_VERSION,
-                                  "mcp_endpoint": MCP_PATH, "tools": [t["name"] for t in TOOLS]})
-            return
-        if self.path.split("?")[0] == MCP_PATH:
-            # No server-initiated stream in this MVP; 405 is spec-compliant.
-            log("GET %s ua=%r accept=%r -> 405" % (
-                self.path, self.headers.get("User-Agent"), self.headers.get("Accept")))
-            self._send(405, b"", "text/plain", {"Allow": "POST, DELETE, OPTIONS"})
-            return
-        self._send(404, b'{"error":"not found"}', "application/json")
-
-    def do_HEAD(self):
-        # Some reachability probes use HEAD. Without this, BaseHTTPRequestHandler answers 501,
-        # which looks like a broken server.
-        path = self.path.split("?")[0]
-        if path in ("/", "/health"):
-            self._send(200, b"", "application/json")
-        elif path == MCP_PATH:
-            self._send(405, b"", "text/plain", {"Allow": "POST, DELETE, OPTIONS"})
-        else:
-            self._send(404)
-
-    def do_DELETE(self):
-        # Session teardown. Stateless server, so nothing to clean up.
-        self._send(204 if self.path.split("?")[0] == MCP_PATH else 404)
-
-    def do_POST(self):
-        if self.path.split("?")[0] != MCP_PATH:
-            self._send_json(404, {"error": "not found, use %s" % MCP_PATH})
-            return
-        if not self._origin_ok():
-            log("rejected Origin: %s" % self.headers.get("Origin"))
-            self._send_json(403, {"error": "origin not allowed"})
-            return
-
-        version = self.headers.get("MCP-Protocol-Version")
-        if version and version not in SUPPORTED_PROTOCOL_VERSIONS:
-            self._send_json(400, {"error": "unsupported MCP-Protocol-Version: %s" % version})
-            return
-
+        encoding = (self.headers.get("Transfer-Encoding") or "").lower()
+        if "chunked" in encoding:
+            chunks = []
+            while True:
+                line = self.rfile.readline(65536).strip()
+                if not line:
+                    break
+                try:
+                    size = int(line.split(b";")[0], 16)
+                except ValueError:
+                    break
+                if size == 0:
+                    self.rfile.readline(65536)  # trailing CRLF
+                    break
+                chunks.append(self.rfile.read(size))
+                self.rfile.readline(65536)  # CRLF after each chunk
+            return b"".join(chunks)
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = 0
-        raw = self.rfile.read(length) if length else b""
+        return self.rfile.read(length) if length else b""
+
+    def _note_origin(self):
+        """Log an unrecognised Origin without blocking.
+
+        Origin checks exist to stop DNS rebinding against servers bound to localhost. This
+        server is public and authless, so refusing an unexpected Origin buys no security and
+        risks rejecting a legitimate client. Reinstate the block when auth lands.
+        """
+        origin = self.headers.get("Origin")
+        if origin and not any(origin.startswith(p) for p in ALLOWED_ORIGIN_PREFIXES):
+            log("unrecognised Origin (allowed anyway): %s" % origin)
+
+    def _header_body_mismatch(self, msg):
+        """Return a complaint string if the mirrored headers disagree with the body.
+
+        The modern transport mirrors method and name into headers so intermediaries can route
+        without parsing the body. If the two disagree, a load balancer and this server would be
+        acting on different values, so the request must be refused.
+
+        Only a genuine mismatch is rejected. A missing header is tolerated: strictness there
+        could only turn a working client into a broken one.
+        """
+        params = msg.get("params") or {}
+        header_method = self.headers.get("Mcp-Method")
+        if header_method and msg.get("method") and header_method != msg.get("method"):
+            return "Mcp-Method header %r does not match body method %r" % (
+                header_method, msg.get("method"))
+
+        header_name = decode_header_value(self.headers.get("Mcp-Name"))
+        body_name = params.get("name") or params.get("uri")
+        if header_name and body_name and header_name != body_name:
+            return "Mcp-Name header %r does not match body value %r" % (header_name, body_name)
+        return None
+
+    # -- verbs ----------------------------------------------------------------
+    def do_OPTIONS(self):
+        self._send(204, extra_headers={
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": ("Content-Type, Accept, Authorization, "
+                                             "MCP-Protocol-Version, Mcp-Method, Mcp-Name"),
+            "Access-Control-Max-Age": "86400",
+        })
+
+    def do_HEAD(self):
+        path = self.path.split("?")[0]
+        if path in ("/", "/health"):
+            self._send(200, b"", "application/json")
+        elif path == MCP_PATH:
+            self._send(405, b"", "text/plain", {"Allow": "POST, OPTIONS"})
+        else:
+            self._send(404)
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path in ("/", "/health"):
+            self._send_json(200, {
+                "status": "ok", "server": SERVER_NAME, "version": SERVER_VERSION,
+                "mcp_endpoint": MCP_PATH, "protocol_versions": list(ALL_VERSIONS),
+                "tools": [t["name"] for t in TOOLS]})
+            return
+        if path == MCP_PATH:
+            # The modern revision removed the GET stream; 405 is the specified answer.
+            log("GET %s ua=%r -> 405" % (self.path, self.headers.get("User-Agent")))
+            self._send(405, b"", "text/plain", {"Allow": "POST, OPTIONS"})
+            return
+        self._send(404, b'{"error":"not found"}', "application/json")
+
+    def do_DELETE(self):
+        # Sessions are gone in the modern revision; DELETE has nothing to terminate.
+        self._send(405, b"", "text/plain", {"Allow": "POST, OPTIONS"})
+
+    def do_POST(self):
+        # Always drain the body first - see _read_body.
+        raw = self._read_body()
+
+        if self.path.split("?")[0] != MCP_PATH:
+            self._send_json(404, {"error": "not found, use %s" % MCP_PATH})
+            return
+        self._note_origin()
 
         try:
             payload = json.loads(raw.decode("utf-8"))
         except Exception:
             log("parse error, first 200 bytes: %r" % raw[:200])
-            self._send_json(400, _error(None, -32700, "Parse error"))
+            self._send_json(400, _error(None, ERR_PARSE, "Parse error"))
             return
-
-        log("POST %s ua=%r accept=%r proto=%r origin=%r session=%r method=%r" % (
-            self.path,
-            self.headers.get("User-Agent"),
-            self.headers.get("Accept"),
-            self.headers.get("MCP-Protocol-Version"),
-            self.headers.get("Origin"),
-            self.headers.get("Mcp-Session-Id"),
-            payload.get("method") if isinstance(payload, dict) else "batch",
-        ))
 
         batch = isinstance(payload, list)
         messages = payload if batch else [payload]
-        responses = [r for r in (handle_message(m) for m in messages) if r is not None]
+        first = messages[0] if messages and isinstance(messages[0], dict) else {}
+        params = first.get("params") or {}
+        meta = params.get("_meta") or {}
 
-        # Notifications / responses only -> 202 with no body.
+        header_version = self.headers.get("MCP-Protocol-Version")
+        body_version = meta.get(META_VERSION)
+        client_info = meta.get(META_CLIENT_INFO) or {}
+
+        log("POST %s client=%r ua=%r method=%r proto=%r/%r accept=%r" % (
+            self.path,
+            client_info.get("name"),
+            self.headers.get("User-Agent"),
+            first.get("method") if not batch else "batch",
+            header_version, body_version,
+            self.headers.get("Accept"),
+        ))
+
+        # The header must agree with the body, or intermediaries and this server would be
+        # acting on different values.
+        if header_version and body_version and header_version != body_version:
+            self._send_json(400, _error(
+                first.get("id"), ERR_HEADER_MISMATCH,
+                "Header mismatch: MCP-Protocol-Version %r does not match _meta %r" % (
+                    header_version, body_version)))
+            return
+
+        mismatch = self._header_body_mismatch(first) if not batch else None
+        if mismatch:
+            self._send_json(400, _error(first.get("id"), ERR_HEADER_MISMATCH,
+                                        "Header mismatch: %s" % mismatch))
+            return
+
+        requested = body_version or header_version
+        if requested and requested not in ALL_VERSIONS:
+            # Say what we do support so the client can retry rather than give up.
+            self._send_json(400, _error(
+                first.get("id"), ERR_UNSUPPORTED_VERSION, "Unsupported protocol version",
+                {"supported": list(ALL_VERSIONS), "requested": requested}))
+            return
+
+        # An initialize request selects legacy semantics; per-request _meta selects modern.
+        if first.get("method") == "initialize":
+            era = "legacy"
+        elif requested in MODERN_VERSIONS or first.get("method") == "server/discover":
+            era = "modern"
+        elif requested in LEGACY_VERSIONS:
+            era = "legacy"
+        else:
+            era = "modern"
+
+        results = [handle_message(m, era) for m in messages]
+        responses = [r for _, r in results if r is not None]
+        status = max([s for s, _ in results] or [200])
+
         if not responses:
             self._send(202)
             return
 
         out = responses if batch else responses[0]
 
-        # A new session id is minted on initialize; we accept requests with or without it.
         extra = {}
-        if not batch and payload.get("method") == "initialize":
+        if era == "legacy" and not batch and first.get("method") == "initialize":
+            # Legacy clients expect a session id. Modern requests never get one.
             extra["Mcp-Session-Id"] = uuid.uuid4().hex
+            extra["Access-Control-Expose-Headers"] = "Mcp-Session-Id"
 
-        # We never send server-initiated messages, so a single JSON object is the simplest
-        # correct answer. Only fall back to SSE if the client refuses JSON.
         accept = (self.headers.get("Accept") or "")
         if "application/json" in accept or "*/*" in accept or not accept:
-            self._send_json(200, out, extra)
+            self._send_json(status, out, extra)
         else:
             self._send_sse(out, extra)
 
@@ -518,7 +674,9 @@ def main():
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8787"))
     httpd = ThreadingHTTPServer((host, port), MCPHandler)
-    log("Valeo connector listening on http://%s:%d%s (%d tools)" % (host, port, MCP_PATH, len(TOOLS)))
+    log("Valeo connector %s listening on http://%s:%d%s (%d tools)" % (
+        SERVER_VERSION, host, port, MCP_PATH, len(TOOLS)))
+    log("protocol versions: %s" % ", ".join(ALL_VERSIONS))
     log("health check: http://%s:%d/health" % (host, port))
     try:
         httpd.serve_forever()
