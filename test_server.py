@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Smoke test for the Valeo connector. Start server.py first, then: python3 test_server.py"""
+"""Smoke test for the Valeo connector.
+
+Local:    python3 test_server.py
+Deployed: python3 test_server.py https://valeo-connector.onrender.com
+"""
 import json, sys, urllib.request, urllib.error
 
-BASE = "http://127.0.0.1:8787"
+BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8787").rstrip("/")
 URL = BASE + "/mcp"
 passed = failed = 0
 
@@ -29,7 +33,7 @@ def check(label, cond, detail=""):
         failed += 1
         print("  FAIL  %s %s" % (label, detail))
 
-print("Valeo connector smoke test\n")
+print("Valeo connector smoke test against %s\n" % BASE)
 
 status, res = call({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                     "params": {"protocolVersion": "2025-06-18", "capabilities": {},

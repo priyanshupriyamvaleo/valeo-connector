@@ -8,6 +8,8 @@ the same way the Function Health connector works.
 - **Auth:** none yet (demo). All data comes from `sample_data.py`.
 - **Read-only.** Every tool is annotated `readOnlyHint: true`.
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/priyanshupriyamvaleo/valeo-connector)
+
 ## Files
 
 | File | What it is |
@@ -71,11 +73,21 @@ https://<your-host>/mcp
 
 `render.yaml` and `Dockerfile` are both in the repo and run `server.py` unchanged.
 
-**Render (no CLI needed, free):**
+**Render (no CLI needed, free, no card):**
 
-1. Push this repo to GitHub.
-2. render.com → **New → Blueprint** → pick the repo → Apply. It reads `render.yaml`.
-3. You get `https://valeo-connector.onrender.com`. The connector URL is that plus `/mcp`.
+1. Click the Deploy to Render button at the top of this README, or go to render.com →
+   **New → Blueprint** → pick this repo → Apply. Either way it reads `render.yaml`.
+2. Sign in with GitHub and approve access to the repo.
+3. You get `https://valeo-connector.onrender.com` (Render may add a suffix if the name is taken).
+   The connector URL is that plus `/mcp`.
+
+Verify the deploy before wiring it into Claude:
+
+```bash
+python3 test_server.py https://valeo-connector.onrender.com
+```
+
+All 22 checks should pass against the live URL exactly as they do locally.
 
 Free instances sleep after ~15 minutes idle, so the first call after a nap takes 30–60s
 (Claude's tool timeout is 300s, so it still works — it just feels slow). The $7 plan or Valeo's
