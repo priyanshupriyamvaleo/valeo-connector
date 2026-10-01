@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 .DS_Store
 .venv/
+
+# Generated locally by the auth experiment. A private key is never committed.
+experiments/auth/signing-key.pem
+*.pem
