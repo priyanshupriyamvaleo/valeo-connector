@@ -5,8 +5,12 @@ failure can only be your auth and never the protocol.
 
 ```bash
 ./run.sh              # starts everything, runs 30 checks, tears it all down
-./run.sh --manual     # pauses so you can sign in through the browser yourself
+./run.sh --manual     # opens the consent screen once, for you to sign in yourself
 ```
+
+`--manual` applies to a single sign-in - Sundeep's, in step 6. Everything else stays
+automated, and the authorization code comes back over a loopback listener, the same way
+Claude Code receives it.
 
 No installs, no accounts, no network. Three servers start on localhost, a test client
 exercises them, everything is killed on exit.

@@ -18,6 +18,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import fixtures
 import jwtlib
@@ -102,12 +103,65 @@ def pkce_pair():
     return verifier, challenge
 
 
-def authorize(client_id, username, challenge, scopes, password=None):
+CALLBACK_PAGE = b"""<!doctype html>
+<title>Connected to Valeo</title>
+<style>body{font-family:-apple-system,system-ui,sans-serif;background:#FFF9E6;color:#1B1815;
+display:grid;place-items:center;min-height:100vh;margin:0}
+div{background:#fff;padding:40px 48px;border-radius:14px;text-align:center}
+h1{font-size:19px;margin:0 0 8px}p{color:#6B6459;font-size:14px;margin:0}</style>
+<div><h1>Connected</h1><p>You can close this tab and go back to the terminal.</p></div>
+"""
+
+
+def listen_for_callback(timeout=180):
+    """Bind the loopback port and return (server, caught), ready to receive the redirect.
+
+    Claude Code is a native client, so it listens on a loopback port and the browser
+    delivers the authorization code straight to it. Doing the same here means no copying
+    codes out of the address bar, and no connection-error page after consent.
+
+    Binding happens before the browser is launched, on purpose: a browser that reached the
+    callback first would otherwise be refused.
+    """
+    caught = {}
+
+    class CallbackHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt, *args):
+            pass
+
+        def do_GET(self):
+            caught.update(dict(urllib.parse.parse_qsl(
+                urllib.parse.urlparse(self.path).query)))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(CALLBACK_PAGE)))
+            self.end_headers()
+            self.wfile.write(CALLBACK_PAGE)
+
+    server = HTTPServer(("127.0.0.1", fixtures.CALLBACK_PORT), CallbackHandler)
+    server.timeout = timeout
+    return server, caught
+
+
+def wait_for_callback(server, caught):
+    """Serve exactly one request - the browser's redirect - then release the port."""
+    try:
+        server.handle_request()
+    except Exception:
+        pass  # a browser that hangs up early still leaves the code in `caught`
+    finally:
+        server.server_close()
+    return caught
+
+
+def authorize(client_id, username, challenge, scopes, password=None, allow_manual=False):
     """Drive the consent screen and come back with an authorization code.
 
-    A browser would do this with a human clicking. We submit the same form, then read the
-    code out of the redirect the server sends back - which is what the browser would hand
-    to Claude's callback URL.
+    Normally the form is submitted directly and the code read out of the redirect, which
+    is what a browser would hand to Claude's callback URL. With --manual, and only for the
+    one sign-in worth watching, a real browser is opened instead.
     """
     member = fixtures.MEMBERS[username]
     state = secrets.token_urlsafe(16)
@@ -122,13 +176,20 @@ def authorize(client_id, username, challenge, scopes, password=None):
     if status != 200:
         return None, None, status
 
-    if MANUAL:
+    if MANUAL and allow_manual:
         import webbrowser
-        print("\n    Opening the consent screen. Sign in as %s." % member["first_name"])
-        print("    The password is in fixtures.py under MEMBERS[%r].\n" % username)
+        print("\n    Opening the consent screen in your browser.")
+        print("    Sign in as %s - the password is in fixtures.py, under"
+              " MEMBERS[%r]." % (member["first_name"], username))
+        print("    Waiting for you to allow access...")
+        server, caught = listen_for_callback()
         webbrowser.open(authorize_url)
-        code = input("    Paste the ?code= value from the address bar: ").strip()
-        return code, state, 200
+        caught = wait_for_callback(server, caught)
+        if not caught.get("code"):
+            print("    Timed out waiting for the browser.")
+            return None, state, 408
+        print("    Got the authorization code back from the browser.\n")
+        return caught.get("code"), caught.get("state"), 200
 
     status, headers, _ = http(fixtures.AUTH_URL + "/authorize", "POST", {
         "username": username,
@@ -153,10 +214,11 @@ def exchange(code, verifier, client_id):
     }, form=True)
 
 
-def sign_in(client_id, username, scopes):
+def sign_in(client_id, username, scopes, allow_manual=False):
     """The whole flow for one member, returning the token response."""
     verifier, challenge = pkce_pair()
-    code, _, _ = authorize(client_id, username, challenge, scopes)
+    code, _, _ = authorize(client_id, username, challenge, scopes,
+                           allow_manual=allow_manual)
     if not code:
         return None
     status, _, tokens = exchange(code, verifier, client_id)
@@ -249,7 +311,9 @@ check("  and that code is now burned, even for the right verifier",
 # --- 6. A real sign-in, for two different members -----------------------------
 step("6. Two members, two different sets of results")
 
-sundeep_tokens = sign_in(client_id, "sundeep", fixtures.SCOPES)
+# The one sign-in --manual opens a browser for. Everything else stays automated, so the
+# run does not turn into five consent screens.
+sundeep_tokens = sign_in(client_id, "sundeep", fixtures.SCOPES, allow_manual=True)
 check("Sundeep signs in and receives an access token",
       bool((sundeep_tokens or {}).get("access_token")))
 check("  and a refresh token, because offline_access was granted",
